@@ -1,0 +1,420 @@
+/**
+ * IoT Dashboard for Solar Plate Auto-Cleaning System
+ * 
+ * This sketch runs on an ESP32/ESP8266 and provides:
+ * - WiFi connectivity
+ * - MQTT communication
+ * - Web dashboard
+ * - OTA updates
+ * 
+ * Note: Only compile this for ESP32/ESP8266 platforms
+ */
+
+#include <WiFi.h>
+#include <PubSubClient.h>
+#include <ArduinoJson.h>
+#include <WebServer.h>
+#include <ArduinoOTA.h>
+#include "../config.h"
+
+// Check if IoT features are enabled
+#ifndef ENABLE_IOT_FEATURES
+  #error "IoT features not enabled. Set ENABLE_IOT_FEATURES to true in config.h"
+#endif
+
+// Network clients
+WiFiClient wifiClient;
+PubSubClient mqttClient(wifiClient);
+WebServer server(80);
+
+// System status
+struct SystemStatus {
+  int dustLevel;
+  int rainLevel;
+  bool systemEnabled;
+  bool cleaningInProgress;
+  unsigned long totalCleaningCycles;
+  unsigned long lastCleaningTime;
+  String lastError;
+} status;
+
+// Timers
+unsigned long lastStatusUpdate = 0;
+const unsigned long STATUS_UPDATE_INTERVAL = 30000; // 30 seconds
+
+void setup() {
+  // Initialize serial
+  Serial.begin(115200);
+  Serial.println(F("Solar Panel Cleaner IoT Dashboard"));
+  
+  // Initialize WiFi
+  setupWiFi();
+  
+  // Initialize MQTT
+  mqttClient.setServer(MQTT_SERVER, MQTT_PORT);
+  mqttClient.setCallback(mqttCallback);
+  
+  // Initialize OTA updates
+  setupOTA();
+  
+  // Initialize web server
+  setupWebServer();
+  
+  Serial.println(F("IoT Dashboard Ready"));
+}
+
+void loop() {
+  // Handle OTA updates
+  ArduinoOTA.handle();
+  
+  // Handle web server requests
+  server.handleClient();
+  
+  // Maintain MQTT connection
+  if (!mqttClient.connected()) {
+    reconnectMQTT();
+  }
+  mqttClient.loop();
+  
+  // Update and publish status periodically
+  unsigned long currentTime = millis();
+  if (currentTime - lastStatusUpdate >= STATUS_UPDATE_INTERVAL) {
+    lastStatusUpdate = currentTime;
+    publishStatus();
+  }
+  
+  // Handle serial communication with main controller
+  processSerialInput();
+}
+
+/**
+ * Set up WiFi connection
+ */
+void setupWiFi() {
+  Serial.print(F("Connecting to WiFi network: "));
+  Serial.println(WIFI_SSID);
+  
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  
+  // Wait for connection
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  
+  Serial.println("");
+  Serial.print(F("Connected to WiFi. IP address: "));
+  Serial.println(WiFi.localIP());
+}
+
+/**
+ * Set up OTA (Over The Air) updates
+ */
+void setupOTA() {
+  // Set up OTA updates
+  ArduinoOTA.setHostname("solar-cleaner");
+  ArduinoOTA.setPassword("admin");
+  
+  ArduinoOTA.onStart([]() {
+    String type = (ArduinoOTA.getCommand() == U_FLASH) ? "sketch" : "filesystem";
+    Serial.println("OTA: Start updating " + type);
+  });
+  
+  ArduinoOTA.onEnd([]() {
+    Serial.println(F("\nOTA: End"));
+  });
+  
+  ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
+    Serial.printf("OTA: Progress: %u%%\r", (progress / (total / 100)));
+  });
+  
+  ArduinoOTA.onError([](ota_error_t error) {
+    Serial.printf("OTA: Error[%u]: ", error);
+    if (error == OTA_AUTH_ERROR) Serial.println(F("Auth Failed"));
+    else if (error == OTA_BEGIN_ERROR) Serial.println(F("Begin Failed"));
+    else if (error == OTA_CONNECT_ERROR) Serial.println(F("Connect Failed"));
+    else if (error == OTA_RECEIVE_ERROR) Serial.println(F("Receive Failed"));
+    else if (error == OTA_END_ERROR) Serial.println(F("End Failed"));
+  });
+  
+  ArduinoOTA.begin();
+  Serial.println(F("OTA updates ready"));
+}
+
+/**
+ * Set up web server for dashboard
+ */
+void setupWebServer() {
+  // Root page - Dashboard
+  server.on("/", HTTP_GET, handleRoot);
+  
+  // API endpoints
+  server.on("/api/status", HTTP_GET, handleGetStatus);
+  server.on("/api/clean", HTTP_POST, handleStartCleaning);
+  server.on("/api/stop", HTTP_POST, handleStopCleaning);
+  server.on("/api/toggle", HTTP_POST, handleToggleSystem);
+  
+  // Start server
+  server.begin();
+  Serial.println(F("Web server started"));
+}
+
+/**
+ * Handle root page request (dashboard)
+ */
+void handleRoot() {
+  String html = "<!DOCTYPE html>\n";
+  html += "<html lang='en'>\n";
+  html += "<head>\n";
+  html += "  <meta charset='UTF-8'>\n";
+  html += "  <meta name='viewport' content='width=device-width, initial-scale=1.0'>\n";
+  html += "  <title>Solar Cleaner Dashboard</title>\n";
+  html += "  <style>\n";
+  html += "    body { font-family: Arial, sans-serif; margin: 0; padding: 20px; }\n";
+  html += "    .container { max-width: 800px; margin: 0 auto; }\n";
+  html += "    .card { background: #f5f5f5; padding: 20px; border-radius: 5px; margin-bottom: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }\n";
+  html += "    .status { display: flex; justify-content: space-between; }\n";
+  html += "    .status-item { text-align: center; flex: 1; padding: 10px; }\n";
+  html += "    .gauge { width: 100px; height: 50px; margin: 0 auto; background: #ddd; border-radius: 50px 50px 0 0; position: relative; overflow: hidden; }\n";
+  html += "    .gauge-fill { position: absolute; bottom: 0; width: 100%; background: #4CAF50; transition: height 0.5s; }\n";
+  html += "    .controls { display: flex; gap: 10px; margin-top: 20px; }\n";
+  html += "    button { padding: 10px 15px; border: none; border-radius: 4px; cursor: pointer; }\n";
+  html += "    .primary { background: #4CAF50; color: white; }\n";
+  html += "    .secondary { background: #2196F3; color: white; }\n";
+  html += "    .warning { background: #FF9800; color: white; }\n";
+  html += "    .error { background: #f44336; color: white; }\n";
+  html += "  </style>\n";
+  html += "</head>\n";
+  html += "<body>\n";
+  html += "  <div class='container'>\n";
+  html += "    <h1>Solar Panel Cleaner Dashboard</h1>\n";
+  html += "    <div class='card'>\n";
+  html += "      <h2>System Status</h2>\n";
+  html += "      <div class='status' id='status'>Loading...</div>\n";
+  html += "    </div>\n";
+  html += "    <div class='card'>\n";
+  html += "      <h2>Controls</h2>\n";
+  html += "      <div class='controls'>\n";
+  html += "        <button class='primary' id='clean-btn'>Start Cleaning</button>\n";
+  html += "        <button class='warning' id='stop-btn'>Stop Cleaning</button>\n";
+  html += "        <button class='secondary' id='toggle-btn'>Enable/Disable</button>\n";
+  html += "      </div>\n";
+  html += "    </div>\n";
+  html += "  </div>\n";
+  html += "  <script>\n";
+  html += "    // Update status every 2 seconds\n";
+  html += "    setInterval(updateStatus, 2000);\n";
+  html += "    updateStatus();\n";
+  html += "    \n";
+  html += "    // Add event listeners\n";
+  html += "    document.getElementById('clean-btn').addEventListener('click', startCleaning);\n";
+  html += "    document.getElementById('stop-btn').addEventListener('click', stopCleaning);\n";
+  html += "    document.getElementById('toggle-btn').addEventListener('click', toggleSystem);\n";
+  html += "    \n";
+  html += "    // Update status function\n";
+  html += "    function updateStatus() {\n";
+  html += "      fetch('/api/status')\n";
+  html += "        .then(response => response.json())\n";
+  html += "        .then(data => {\n";
+  html += "          const statusContainer = document.getElementById('status');\n";
+  html += "          statusContainer.innerHTML = `\n";
+  html += "            <div class='status-item'>\n";
+  html += "              <h3>Dust Level</h3>\n";
+  html += "              <div class='gauge'>\n";
+  html += "                <div class='gauge-fill' style='height: ${data.dustLevel / 10}%'></div>\n";
+  html += "              </div>\n";
+  html += "              <p>${data.dustLevel}/1000</p>\n";
+  html += "            </div>\n";
+  html += "            <div class='status-item'>\n";
+  html += "              <h3>Rain Detected</h3>\n";
+  html += "              <p>${data.rainLevel < 400 ? 'Yes' : 'No'}</p>\n";
+  html += "            </div>\n";
+  html += "            <div class='status-item'>\n";
+  html += "              <h3>System</h3>\n";
+  html += "              <p>${data.systemEnabled ? 'Enabled' : 'Disabled'}</p>\n";
+  html += "            </div>\n";
+  html += "            <div class='status-item'>\n";
+  html += "              <h3>Status</h3>\n";
+  html += "              <p>${data.cleaningInProgress ? 'Cleaning' : 'Idle'}</p>\n";
+  html += "            </div>\n";
+  html += "          `;\n";
+  html += "        });\n";
+  html += "    }\n";
+  html += "    \n";
+  html += "    // Control functions\n";
+  html += "    function startCleaning() {\n";
+  html += "      fetch('/api/clean', { method: 'POST' });\n";
+  html += "    }\n";
+  html += "    \n";
+  html += "    function stopCleaning() {\n";
+  html += "      fetch('/api/stop', { method: 'POST' });\n";
+  html += "    }\n";
+  html += "    \n";
+  html += "    function toggleSystem() {\n";
+  html += "      fetch('/api/toggle', { method: 'POST' });\n";
+  html += "    }\n";
+  html += "  </script>\n";
+  html += "</body>\n";
+  html += "</html>";
+  
+  server.send(200, "text/html", html);
+}
+
+/**
+ * Handle API request to get status
+ */
+void handleGetStatus() {
+  DynamicJsonDocument doc(256);
+  
+  doc["dustLevel"] = status.dustLevel;
+  doc["rainLevel"] = status.rainLevel;
+  doc["systemEnabled"] = status.systemEnabled;
+  doc["cleaningInProgress"] = status.cleaningInProgress;
+  doc["totalCleaningCycles"] = status.totalCleaningCycles;
+  doc["lastCleaningTime"] = status.lastCleaningTime;
+  
+  String response;
+  serializeJson(doc, response);
+  server.send(200, "application/json", response);
+}
+
+/**
+ * Handle API request to start cleaning
+ */
+void handleStartCleaning() {
+  if (!status.cleaningInProgress) {
+    Serial.println(F("CMD:START"));
+    server.send(200, "text/plain", "Cleaning started");
+  } else {
+    server.send(400, "text/plain", "Cleaning already in progress");
+  }
+}
+
+/**
+ * Handle API request to stop cleaning
+ */
+void handleStopCleaning() {
+  Serial.println(F("CMD:STOP"));
+  server.send(200, "text/plain", "Cleaning stopped");
+}
+
+/**
+ * Handle API request to toggle system
+ */
+void handleToggleSystem() {
+  Serial.println(status.systemEnabled ? F("CMD:DISABLE") : F("CMD:ENABLE"));
+  server.send(200, "text/plain", "System toggled");
+}
+
+/**
+ * Connect/reconnect to MQTT broker
+ */
+void reconnectMQTT() {
+  // Loop until we're reconnected
+  while (!mqttClient.connected()) {
+    Serial.print(F("Attempting MQTT connection..."));
+    
+    // Create a random client ID
+    String clientId = MQTT_CLIENT_ID;
+    clientId += String(random(0xffff), HEX);
+    
+    // Attempt to connect
+    if (mqttClient.connect(clientId.c_str(), MQTT_USERNAME, MQTT_PASSWORD)) {
+      Serial.println(F("connected"));
+      
+      // Subscribe to command topic
+      mqttClient.subscribe(MQTT_TOPIC_COMMAND);
+    } else {
+      Serial.print(F("failed, rc="));
+      Serial.print(mqttClient.state());
+      Serial.println(F(" try again in 5 seconds"));
+      
+      // Wait 5 seconds before retrying
+      delay(5000);
+    }
+  }
+}
+
+/**
+ * Callback for when a MQTT message arrives
+ */
+void mqttCallback(char* topic, byte* payload, unsigned int length) {
+  // Convert payload to string
+  char message[length + 1];
+  for (unsigned int i = 0; i < length; i++) {
+    message[i] = (char)payload[i];
+  }
+  message[length] = '\0';
+  
+  Serial.print(F("MQTT message received: "));
+  Serial.println(message);
+  
+  // Process commands
+  if (strcmp(topic, MQTT_TOPIC_COMMAND) == 0) {
+    if (strcmp(message, "START") == 0) {
+      Serial.println(F("CMD:START"));
+    } else if (strcmp(message, "STOP") == 0) {
+      Serial.println(F("CMD:STOP"));
+    } else if (strcmp(message, "ENABLE") == 0) {
+      Serial.println(F("CMD:ENABLE"));
+    } else if (strcmp(message, "DISABLE") == 0) {
+      Serial.println(F("CMD:DISABLE"));
+    } else if (strcmp(message, "STATUS") == 0) {
+      publishStatus();
+    }
+  }
+}
+
+/**
+ * Publish system status to MQTT
+ */
+void publishStatus() {
+  DynamicJsonDocument doc(256);
+  
+  doc["dustLevel"] = status.dustLevel;
+  doc["rainLevel"] = status.rainLevel;
+  doc["systemEnabled"] = status.systemEnabled;
+  doc["cleaningInProgress"] = status.cleaningInProgress;
+  doc["totalCleaningCycles"] = status.totalCleaningCycles;
+  
+  String payload;
+  serializeJson(doc, payload);
+  
+  mqttClient.publish(MQTT_TOPIC_STATUS, payload.c_str());
+}
+
+/**
+ * Process input from main controller
+ */
+void processSerialInput() {
+  if (Serial.available()) {
+    String input = Serial.readStringUntil('\n');
+    
+    // Parse status updates
+    if (input.startsWith("STATUS:")) {
+      input.remove(0, 7);  // Remove "STATUS:" prefix
+      
+      // Parse JSON status
+      DynamicJsonDocument doc(256);
+      DeserializationError error = deserializeJson(doc, input);
+      
+      if (!error) {
+        status.dustLevel = doc["dust"];
+        status.rainLevel = doc["rain"];
+        status.systemEnabled = doc["enabled"];
+        status.cleaningInProgress = doc["cleaning"];
+        status.totalCleaningCycles = doc["cycles"];
+        status.lastCleaningTime = doc["lastTime"];
+        
+        // Publish updated status
+        publishStatus();
+      }
+    }
+    // Parse error messages
+    else if (input.startsWith("ERROR:")) {
+      input.remove(0, 6);  // Remove "ERROR:" prefix
+      status.lastError = input;
+    }
+  }
+}

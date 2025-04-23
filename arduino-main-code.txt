@@ -1,0 +1,252 @@
+/**
+ * Solar Plate Auto-Cleaning System
+ * 
+ * This sketch controls an automated solar panel cleaning system that
+ * detects dust accumulation and cleans panels when necessary.
+ * 
+ * Components:
+ * - Arduino/ESP32 microcontroller
+ * - LDR sensor for dust detection
+ * - Rain sensor to avoid cleaning during rain
+ * - Motor for cleaning mechanism movement
+ * - Optional water pump for wet cleaning
+ * 
+ * @author Your Name
+ * @version 1.0.0
+ * @license MIT
+ */
+
+#include "config.h"
+
+// Pin definitions
+#define LDR_PIN A0          // Light sensor for dust detection
+#define RAIN_PIN A1         // Rain sensor
+#define MOTOR_PIN 9         // Cleaning mechanism motor control
+#define PUMP_PIN 10         // Water pump control (optional)
+#define STATUS_LED_PIN 13   // Status LED
+
+// Thresholds and timing
+#define DUST_THRESHOLD 500  // Higher value = more dust
+#define RAIN_THRESHOLD 400  // Lower value = rain detected
+#define CLEANING_TIME 10000 // Duration of cleaning cycle (ms)
+#define CHECK_INTERVAL 60000 // Time between sensor checks (ms)
+
+// System state variables
+bool systemEnabled = true;
+bool cleaningInProgress = false;
+unsigned long lastCheckTime = 0;
+unsigned long cleaningStartTime = 0;
+int dustLevel = 0;
+int rainLevel = 0;
+
+// Statistics
+unsigned long totalCleaningCycles = 0;
+unsigned long lastCleaningTime = 0;
+
+void setup() {
+  // Initialize serial communication
+  Serial.begin(9600);
+  Serial.println(F("Solar Panel Auto-Cleaning System v1.0.0"));
+  Serial.println(F("Initializing..."));
+  
+  // Configure pins
+  pinMode(LDR_PIN, INPUT);
+  pinMode(RAIN_PIN, INPUT);
+  pinMode(MOTOR_PIN, OUTPUT);
+  pinMode(PUMP_PIN, OUTPUT);
+  pinMode(STATUS_LED_PIN, OUTPUT);
+  
+  // Ensure all outputs are off initially
+  digitalWrite(MOTOR_PIN, LOW);
+  digitalWrite(PUMP_PIN, LOW);
+  digitalWrite(STATUS_LED_PIN, LOW);
+  
+  // Initialization complete
+  blinkLED(3, 200);  // Blink 3 times to indicate successful startup
+  Serial.println(F("System initialized and ready"));
+
+  // Print configuration
+  Serial.print(F("Dust threshold: "));
+  Serial.println(DUST_THRESHOLD);
+  Serial.print(F("Rain threshold: "));
+  Serial.println(RAIN_THRESHOLD);
+  Serial.print(F("Cleaning time: "));
+  Serial.println(CLEANING_TIME);
+  Serial.print(F("Check interval: "));
+  Serial.println(CHECK_INTERVAL);
+}
+
+void loop() {
+  // Current time
+  unsigned long currentTime = millis();
+  
+  // If a cleaning cycle is in progress, check if it's time to end
+  if (cleaningInProgress) {
+    if (currentTime - cleaningStartTime >= CLEANING_TIME) {
+      stopCleaning();
+    }
+    return;  // Skip sensor checks during cleaning
+  }
+  
+  // Check sensors at regular intervals
+  if (currentTime - lastCheckTime >= CHECK_INTERVAL) {
+    lastCheckTime = currentTime;
+    checkSensors();
+    
+    // Log current status
+    logStatus();
+    
+    // Decision logic
+    if (!systemEnabled) {
+      Serial.println(F("System disabled. Skipping cleaning cycle."));
+    } 
+    else if (rainLevel < RAIN_THRESHOLD) {
+      Serial.println(F("Rain detected. Skipping cleaning cycle."));
+    } 
+    else if (dustLevel > DUST_THRESHOLD) {
+      Serial.println(F("Dust threshold exceeded. Starting cleaning cycle."));
+      startCleaning(true);  // true = use water pump
+    }
+    else {
+      Serial.println(F("Conditions normal. No cleaning needed."));
+    }
+  }
+  
+  // Process any serial commands
+  processSerialCommands();
+}
+
+/**
+ * Read all sensor values and update system state
+ */
+void checkSensors() {
+  // Read light level (inverse relationship with dust)
+  int lightLevel = analogRead(LDR_PIN);
+  dustLevel = 1023 - lightLevel;  // Convert to dust level
+  
+  // Read rain sensor
+  rainLevel = analogRead(RAIN_PIN);
+  
+  // Additional sensors can be added here
+}
+
+/**
+ * Start a cleaning cycle
+ * 
+ * @param useWater Whether to use water for cleaning
+ */
+void startCleaning(bool useWater) {
+  if (cleaningInProgress) {
+    return;  // Don't start if already cleaning
+  }
+  
+  // Update state
+  cleaningInProgress = true;
+  cleaningStartTime = millis();
+  totalCleaningCycles++;
+  
+  // Start motor
+  digitalWrite(MOTOR_PIN, HIGH);
+  digitalWrite(STATUS_LED_PIN, HIGH);  // LED on during cleaning
+  
+  // If wet cleaning is enabled, start pump
+  if (useWater) {
+    digitalWrite(PUMP_PIN, HIGH);
+    Serial.println(F("Wet cleaning cycle started"));
+  } else {
+    Serial.println(F("Dry cleaning cycle started"));
+  }
+}
+
+/**
+ * Stop the current cleaning cycle
+ */
+void stopCleaning() {
+  // Update state
+  cleaningInProgress = false;
+  lastCleaningTime = millis();
+  
+  // Stop all outputs
+  digitalWrite(MOTOR_PIN, LOW);
+  digitalWrite(PUMP_PIN, LOW);
+  digitalWrite(STATUS_LED_PIN, LOW);
+  
+  Serial.println(F("Cleaning cycle completed"));
+}
+
+/**
+ * Log the current system status
+ */
+void logStatus() {
+  Serial.println(F("--- System Status ---"));
+  Serial.print(F("Dust level: "));
+  Serial.println(dustLevel);
+  Serial.print(F("Rain level: "));
+  Serial.println(rainLevel);
+  Serial.print(F("System enabled: "));
+  Serial.println(systemEnabled ? F("Yes") : F("No"));
+  Serial.print(F("Total cleaning cycles: "));
+  Serial.println(totalCleaningCycles);
+  Serial.println(F("--------------------"));
+}
+
+/**
+ * Process any commands received via serial
+ */
+void processSerialCommands() {
+  if (Serial.available() > 0) {
+    char command = Serial.read();
+    
+    switch (command) {
+      case 'e':  // Enable system
+        systemEnabled = true;
+        Serial.println(F("System enabled"));
+        break;
+        
+      case 'd':  // Disable system
+        systemEnabled = false;
+        Serial.println(F("System disabled"));
+        break;
+        
+      case 'c':  // Start cleaning cycle (dry)
+        if (systemEnabled && !cleaningInProgress) {
+          Serial.println(F("Manual dry cleaning triggered"));
+          startCleaning(false);
+        }
+        break;
+        
+      case 'w':  // Start cleaning cycle (wet)
+        if (systemEnabled && !cleaningInProgress) {
+          Serial.println(F("Manual wet cleaning triggered"));
+          startCleaning(true);
+        }
+        break;
+        
+      case 's':  // Stop cleaning
+        if (cleaningInProgress) {
+          Serial.println(F("Cleaning manually stopped"));
+          stopCleaning();
+        }
+        break;
+        
+      case 'r':  // Report status
+        logStatus();
+        break;
+    }
+  }
+}
+
+/**
+ * Blink the status LED
+ * 
+ * @param times Number of times to blink
+ * @param interval Time interval between blinks (ms)
+ */
+void blinkLED(int times, int interval) {
+  for (int i = 0; i < times; i++) {
+    digitalWrite(STATUS_LED_PIN, HIGH);
+    delay(interval);
+    digitalWrite(STATUS_LED_PIN, LOW);
+    delay(interval);
+  }
+}

@@ -1,0 +1,71 @@
+name: Solar Cleaner CI/CD
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  arduino-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Arduino Lint
+        uses: arduino/arduino-lint-action@v1
+        with:
+          library-manager: update
+          compliance: strict
+          project-type: sketch
+          verbose: true
+  
+  compile-sketches:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Compile Arduino Sketches
+        uses: arduino/compile-sketches@v1
+        with:
+          sketch-paths: |
+            ./src/main.ino
+          fqbn: arduino:avr:uno
+          libraries: |
+            # List any required libraries here
+          verbose: true
+          
+  test-esp32-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.x'
+      
+      - name: Install PlatformIO
+        run: |
+          python -m pip install --upgrade pip
+          pip install platformio
+          
+      - name: Create PlatformIO test project
+        run: |
+          mkdir -p pio_test
+          cp -r src pio_test/
+          cp -r iot pio_test/
+          cd pio_test
+          
+          # Create platformio.ini
+          echo "[env:esp32dev]" > platformio.ini
+          echo "platform = espressif32" >> platformio.ini
+          echo "board = esp32dev" >> platformio.ini
+          echo "framework = arduino" >> platformio.ini
+          echo "lib_deps =" >> platformio.ini
+          echo "  PubSubClient" >> platformio.ini
+          echo "  ArduinoJson" >> platformio.ini
+          echo "  ESP32 Arduino" >> platformio.ini
+          
+          # Edit config.h to enable IoT features
+          sed -i 's/#define ENABLE_IOT_FEATURES false
