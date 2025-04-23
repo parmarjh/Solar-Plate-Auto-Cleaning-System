@@ -238,7 +238,7 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## 📞 Contact
 
-Project Link: [https://github.com/yourusername/solar-plate-auto-cleaning](https://github.com/yourusername/solar-plate-auto-cleaning)
+Project Link: [https://github.com/parmarjh/solar-plate-auto-cleaning](https://github.com/yourusername/solar-plate-auto-cleaning)
 
 ---
 
